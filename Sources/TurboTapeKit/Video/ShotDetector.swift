@@ -1,6 +1,6 @@
 /// Shot changes (hard cuts) inside a source clip.
 ///
-/// Port of FilmCraft's `render/src/scene.rs` (see ATTRIBUTION.md). Each frame is reduced to a
+/// Each frame is reduced to a
 /// `Signature`: a 32×18 grid of mean luma and a 16-bin histogram per RGB channel. The difference
 /// of two frames mixes the histogram distance with the mean absolute luma difference of the grids.
 /// A hard cut changes both; camera or subject motion moves the grid but keeps the histogram.

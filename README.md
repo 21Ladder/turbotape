@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="App/Assets.xcassets/AppIcon.appiconset/icon_128@2x.png" width="160" alt="TurboTape icon: a VHS cassette">
+</p>
+
 # TurboTape
 
 A native macOS app that cuts your videos to the beat of a song and exports a vertical short video.

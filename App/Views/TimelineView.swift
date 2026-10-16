@@ -49,7 +49,7 @@ struct TimelinePanel: View {
                 } label: { Image(systemName: "arrow.left.and.right.square") }
                     .help("Zoom to fit (⌘-scroll or pinch to zoom)")
             }
-            Text("Music: drag a beat (⌥ free) · ⇧-drag moves all · double-click adds · ⌫ deletes · ←/→ 10 ms      Video: drag a cut · select a shot and scroll over it to change which part plays (, / .)")
+            Text("Music: drag a beat (⌥ free) · ⇧-drag moves all · double-click adds · ⌫ deletes · ←/→ 10 ms      Video: drag a cut · drag a shot to move it · right-click: replace / re-roll (R) · scroll over a shot to change its part (, / .)")
                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
             TimelineView()
@@ -176,6 +176,23 @@ struct TimelineView: View {
             }
         }
 
+        // a shot being moved: dim it and mark where it will land
+        if let d = model.shotDrag, t.segments.indices.contains(d.from), t.segments.indices.contains(d.to) {
+            let src = t.segments[d.from]
+            ctx.fill(Path(CGRect(x: x(src.startFrame), y: rowTop, width: CGFloat(src.frameCount) * ppf, height: rowH)), with: .color(.black.opacity(0.6)))
+            if d.to != d.from {
+                let ex = x(d.to > d.from ? t.segments[d.to].endFrame : t.segments[d.to].startFrame)
+                ctx.fill(Path(roundedRect: CGRect(x: ex - 2.5, y: rowTop - 3, width: 5, height: rowH + 6), cornerRadius: 2.5), with: .color(.accentColor))
+            }
+        }
+        // a video from the library being dropped on a shot
+        if let i = model.dropTarget, t.segments.indices.contains(i) {
+            let s = t.segments[i]
+            let r = CGRect(x: x(s.startFrame), y: rowTop, width: CGFloat(s.frameCount) * ppf, height: rowH)
+            ctx.fill(Path(r), with: .color(.accentColor.opacity(0.35)))
+            ctx.stroke(Path(r.insetBy(dx: 1.5, dy: 1.5)), with: .color(.accentColor), lineWidth: 3)
+        }
+
         // selected cut
         if let c = model.selectedCut, t.segments.indices.contains(c) {
             let cx = x(t.segments[c].startFrame)
@@ -219,6 +236,9 @@ struct TimelineEventView: NSViewRepresentable {
             case slip(Int, startX: CGFloat, base: Double)
             case beat(Int, base: BeatGrid)
             case allBeats(startX: CGFloat, base: BeatGrid)
+            /// Pressed on a shot: becomes a move once the mouse travels a few points.
+            case pressShot(Int, startX: CGFloat)
+            case moveShot(Int)
             case scrub
         }
         private var drag: Drag?
@@ -228,6 +248,14 @@ struct TimelineEventView: NSViewRepresentable {
         private var lastSnap: Int?
         private var scrollAccum: CGFloat = 0
         private var scrollEnd: Task<Void, Never>?
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            // videos dragged from the library onto a shot replace its clip
+            registerForDraggedTypes([.fileURL])
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
         override var acceptsFirstResponder: Bool { true }
         override var isFlipped: Bool { true }
@@ -323,6 +351,10 @@ struct TimelineEventView: NSViewRepresentable {
                     drag = .slip(i, startX: p.x, base: t.segments[i].sourceStart)
                     return
                 }
+                // a click shows that frame; a drag moves the shot
+                drag = .pressShot(i, startX: p.x)
+                m.seek(frame: f)
+                return
             } else {
                 m.selectedSegment = nil
             }
@@ -378,15 +410,83 @@ struct TimelineEventView: NSViewRepresentable {
                 let shifted = grid.shifted(by: dt)
                 m.updateBeats(shifted)
                 m.flash(String(format: "All beats %+.0f ms", m.beatShift(shifted) * 1000))
+            case .pressShot(let i, let startX):
+                guard abs(p.x - startX) > 6 else { return }
+                self.drag = .moveShot(i)
+                NSCursor.closedHand.set()
+                m.shotDrag = AppModel.ShotDrag(from: i, to: i)
+            case .moveShot(let i):
+                let n = base.segments.count
+                let to = base.segmentIndex(at: Int(frame(at: p.x))) ?? (p.x < xOf(0) ? 0 : n - 1)
+                m.shotDrag = AppModel.ShotDrag(from: i, to: min(max(to, 0), n - 1))
             case .scrub:
                 m.seek(frame: Int(frame(at: p.x)))
             }
         }
 
         override func mouseUp(with e: NSEvent) {
+            if case .moveShot = drag, let m = model, let d = m.shotDrag {
+                m.shotDrag = nil
+                NSCursor.arrow.set()
+                if d.to != d.from { m.moveShot(from: d.from, to: d.to) }
+            }
             if let g = dragGesture { model?.endGesture(g) }
             dragGesture = nil
             drag = nil
+        }
+
+        // MARK: Right-click menu
+
+        override func menu(for event: NSEvent) -> NSMenu? {
+            guard let m = model, let t = m.timeline else { return nil }
+            let p = convert(event.locationInWindow, from: nil)
+            guard p.y >= rowTop, let i = t.segmentIndex(at: Int(frame(at: p.x))) else { return nil }
+            m.selectedSegment = i
+            m.selectedCut = nil
+            m.selectedBeat = nil
+            let menu = NSMenu()
+            menu.addItem(ActionItem("Re-roll This Shot", key: "r") { m.rerollShot(i) })
+            let replace = NSMenuItem(title: "Replace Clip", action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            for c in m.clips where c.analysis != nil {
+                let item = ActionItem(c.name) { m.replaceShot(i, with: c.url) }
+                if c.url == t.segments[i].clip { item.state = .on }
+                sub.addItem(item)
+            }
+            replace.submenu = sub
+            menu.addItem(replace)
+            menu.addItem(.separator())
+            menu.addItem(ActionItem(t.segments[i].pinned ? "Unpin" : "Pin", key: "p") { m.togglePin(i) })
+            return menu
+        }
+
+        // MARK: Dropping a video from the library on a shot
+
+        private func dropTarget(_ info: NSDraggingInfo) -> Int? {
+            guard let t = model?.timeline else { return nil }
+            let p = convert(info.draggingLocation, from: nil)
+            guard p.y >= rowTop else { return nil }
+            return t.segmentIndex(at: Int(frame(at: p.x)))
+        }
+
+        override func draggingEntered(_ info: NSDraggingInfo) -> NSDragOperation { draggingUpdated(info) }
+
+        override func draggingUpdated(_ info: NSDraggingInfo) -> NSDragOperation {
+            let i = dropTarget(info)
+            if model?.dropTarget != i { model?.dropTarget = i }
+            return i == nil ? [] : .copy
+        }
+
+        override func draggingExited(_ info: NSDraggingInfo?) { model?.dropTarget = nil }
+
+        override func performDragOperation(_ info: NSDraggingInfo) -> Bool {
+            defer { model?.dropTarget = nil }
+            guard let i = dropTarget(info),
+                  let url = (info.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+                                                                 options: [.urlReadingFileURLsOnly: true]) as? [URL])?.first
+            else { return false }
+            model?.replaceShot(i, with: url)
+            return true
         }
 
         override func scrollWheel(with e: NSEvent) {
@@ -460,6 +560,8 @@ struct TimelineEventView: NSViewRepresentable {
                 m.slipSelected(by: dir * (shift ? (m.timeline?.fps ?? 30) : 1))
             case 35:  // p
                 if let i = m.selectedSegment { m.togglePin(i) }
+            case 15 where !e.modifierFlags.contains(.command):  // r
+                if let i = m.selectedSegment { m.rerollShot(i) }
             case 53:  // esc
                 m.selectedSegment = nil
                 m.selectedCut = nil
@@ -488,9 +590,21 @@ struct SlipInspector: View {
                     Text(a.info.name).lineLimit(1).truncationMode(.middle).font(.callout)
                     Text(String(format: "%.2f – %.2f s of %@", s.sourceStart, s.sourceStart + len, a.duration.clock))
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                    Button(s.pinned ? "Unpin" : "Pin") { model.togglePin(i) }
-                        .controlSize(.small)
-                        .help("Pinned clips (📌) are kept when you Shuffle (P)")
+                    HStack(spacing: 6) {
+                        Button(s.pinned ? "Unpin" : "Pin") { model.togglePin(i) }
+                            .help("Pinned clips (📌) are kept when you Shuffle (P)")
+                        Button { model.rerollShot(i) } label: { Image(systemName: "dice") }
+                            .help("Re-roll this shot only: another clip or part (R)")
+                        Menu {
+                            ForEach(model.clips.filter { $0.analysis != nil }) { c in
+                                Button(c.name) { model.replaceShot(i, with: c.url) }
+                            }
+                        } label: { Image(systemName: "rectangle.2.swap") }
+                            .menuIndicator(.hidden)
+                            .fixedSize()
+                            .help("Replace this shot's clip (or drag a video from the library onto the shot)")
+                    }
+                    .controlSize(.small)
                 }
                 .frame(width: 190, alignment: .leading)
                 GeometryReader { geo in
@@ -565,4 +679,20 @@ struct SlipInspector: View {
             .frame(maxHeight: .infinity)
         }
     }
+}
+
+/// A menu item that runs a closure.
+final class ActionItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(_ title: String, key: String = "", handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(fire), keyEquivalent: key)
+        keyEquivalentModifierMask = []
+        target = self
+    }
+
+    required init(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    @objc private func fire() { handler() }
 }

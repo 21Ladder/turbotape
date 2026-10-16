@@ -77,6 +77,8 @@ struct ClipCell: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { model.toggleIncluded(item.url) }
+        // drag onto a shot in the timeline to show this clip there
+        .onDrag { NSItemProvider(object: item.url as NSURL) }
         .help(item.included ? "Click to leave this video out" : "Click to use this video again")
         .contextMenu {
             Button(item.included ? "Leave Out" : "Use") { model.toggleIncluded(item.url) }

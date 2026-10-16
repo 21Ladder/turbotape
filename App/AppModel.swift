@@ -41,6 +41,11 @@ final class AppModel {
     /// The beats the current timeline was cut on.
     var beatsUsed: BeatGrid?
     var selectedBeat: Int?
+    /// A shot being dragged to another position (for drawing the drop marker).
+    struct ShotDrag: Equatable { var from: Int; var to: Int }
+    var shotDrag: ShotDrag?
+    /// The shot a video from the library is being dragged onto.
+    var dropTarget: Int?
     /// How well the steady grid matches the tracked beats (nil in Detected mode).
     var steadyFit: Double? {
         guard beatMode == .steady, let music, let beats else { return nil }
@@ -287,7 +292,8 @@ final class AppModel {
         for u in urls { _ = u.startAccessingSecurityScopedResource() }
         let known = Set(clips.map(\.url))
         let new = MediaLibrary.movieFiles(in: urls).filter { !known.contains($0) }
-        if new.isEmpty, !urls.isEmpty { flash("No new videos found") }
+        // (a clip dragged from the library and dropped back on it is not news)
+        if new.isEmpty, !urls.isEmpty, !urls.allSatisfy({ known.contains($0.standardizedFileURL) }) { flash("No new videos found") }
         for url in new {
             clips.append(ClipItem(url: url))
             Task { await analyze(url) }
@@ -697,6 +703,57 @@ final class AppModel {
     }
 
     var isGesturing: Bool { gestureBase != nil }
+
+    // MARK: - Shots: move, replace, re-roll
+
+    /// Move shot `from` to position `to`; the cuts stay on the beat, the contents move.
+    func moveShot(from: Int, to: Int) {
+        guard let t = timeline, from != to else { return }
+        guard let r = TimelineEdits.moveShot(t, from: from, to: to, durations: durations) else {
+            flash("That clip is too short for the shot at the new position")
+            return
+        }
+        selectedSegment = to
+        selectedCut = nil
+        commit(r.timeline, actionName: "Move Shot", seek: r.timeline.segments[to].startFrame)
+        flash(r.clamped ? "Shot moved · in-points pulled earlier to fit" : "Shot moved")
+    }
+
+    /// Show another video in shot `i`, at its best part.
+    func replaceShot(_ i: Int, with url: URL) {
+        guard let t = timeline, t.segments.indices.contains(i) else { return }
+        let u = url.standardizedFileURL
+        guard let item = clips.first(where: { $0.url == u }) else {
+            addClips([url])
+            flash("Video added to the library · drop it on the shot again once it's analysed")
+            return
+        }
+        guard let a = item.analysis else {
+            flash("\(item.name) is still being analysed")
+            return
+        }
+        guard let out = TimelineEdits.replaceClip(t, segment: i, with: a) else {
+            flash(String(format: "%@ is too short for this shot (%.1f s)", item.name, Double(t.segments[i].frameCount) / Double(t.fps)))
+            return
+        }
+        selectedSegment = i
+        commit(out, actionName: "Replace Clip", seek: t.segments[i].startFrame)
+        let s = out.segments[i]
+        flash(String(format: "%@ · %.2f – %.2f s", item.name, s.sourceStart, s.sourceStart + Double(s.frameCount) / Double(t.fps)))
+    }
+
+    /// A new random pick for shot `i` only.
+    func rerollShot(_ i: Int) {
+        guard let t = timeline, t.segments.indices.contains(i) else { return }
+        guard let out = EditPlanner.reroll(t, segment: i, clips: readyClips, seed: UInt64.random(in: 1...UInt64.max)) else {
+            flash("No other clip fits this shot")
+            return
+        }
+        selectedSegment = i
+        commit(out, actionName: "Re-roll Shot", seek: t.segments[i].startFrame)
+        let s = out.segments[i]
+        flash(String(format: "%@ · %.2f s", s.clip.deletingPathExtension().lastPathComponent, s.sourceStart))
+    }
 
     func togglePin(_ i: Int) {
         guard let t = timeline, t.segments.indices.contains(i) else { return }

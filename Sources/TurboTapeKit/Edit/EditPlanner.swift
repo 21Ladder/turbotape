@@ -178,7 +178,7 @@ struct ClipPicker {
         return Part(clip: candidates[ci].clip.url, sourceStart: windows[wi].start, frames: slot)
     }
 
-    private func windowsFor(_ c: ClipAnalysis, length: Double, allowReuse: Bool) -> [(start: Double, score: Float)] {
+    func windowsFor(_ c: ClipAnalysis, length: Double, allowReuse: Bool) -> [(start: Double, score: Float)] {
         let step = 0.2
         var out = [(start: Double, score: Float)]()
         var ranges = c.shots.filter { $0.upperBound - $0.lowerBound >= length }
@@ -196,5 +196,41 @@ struct ClipPicker {
             }
         }
         return out
+    }
+}
+
+// MARK: - Single-shot picks (manual edits)
+
+extension EditPlanner {
+    /// The best-scoring `length`-second part of `clip` (inside one shot where possible), or nil
+    /// when the clip is too short.
+    public static func bestStart(in clip: ClipAnalysis, length: Double, fps: Int) -> Double? {
+        ClipPicker(clips: [clip], fps: fps).windowsFor(clip, length: length, allowReuse: true)
+            .max { $0.score < $1.score }?.start
+    }
+
+    /// Shot `i` re-rolled on its own: another clip (not its neighbours', not its own when others
+    /// fit), or else another part of a clip, chosen like Generate does. Nil when nothing fits.
+    public static func reroll(_ t: Timeline, segment i: Int, clips: [ClipAnalysis], seed: UInt64) -> Timeline? {
+        guard t.segments.indices.contains(i) else { return nil }
+        let s = t.segments[i]
+        var picker = ClipPicker(clips: clips, fps: t.fps)
+        // everything already in the video counts as used, so the shot's current part is not picked again
+        for seg in t.segments { picker.markUsed(seg) }
+        var rng = SplitMix64(seed: seed)
+        let neighbours = [i > 0 ? t.segments[i - 1].clip : nil, i + 1 < t.segments.count ? t.segments[i + 1].clip : nil].compactMap { $0 }
+        let slot = s.startFrame..<s.endFrame
+        for avoid in [neighbours + [s.clip], neighbours, []] {
+            var attempt = picker
+            guard let parts = try? attempt.fill(slot, avoiding: avoid, rng: &rng), parts.count == 1 else { continue }
+            let p = parts[0]
+            if p.clip == s.clip && abs(p.sourceStart - s.sourceStart) < 1e-6 { continue }
+            var out = t
+            out.segments[i].clip = p.clip
+            out.segments[i].sourceStart = p.sourceStart
+            out.segments[i].pinned = true
+            return out
+        }
+        return nil
     }
 }

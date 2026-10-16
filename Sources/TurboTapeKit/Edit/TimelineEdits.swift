@@ -103,6 +103,46 @@ public enum TimelineEdits {
         return Result(timeline: out, clamped: abs(v - start) > 1e-9)
     }
 
+    /// Move shot `from` to position `to`. The cuts stay where they are (on the beat); the shots'
+    /// contents move, the ones in between shift by one. Each keeps its clip and in-point, pulled
+    /// earlier if the new slot is longer than what's left of the clip. Nil when a clip is too
+    /// short for the slot it would land in. The moved shot gets pinned.
+    public static func moveShot(_ t: Timeline, from: Int, to: Int, durations: [URL: Double]) -> Result? {
+        guard t.segments.indices.contains(from), t.segments.indices.contains(to) else { return nil }
+        guard from != to else { return Result(timeline: t, clamped: false) }
+        var contents = t.segments
+        let moved = contents.remove(at: from)
+        contents.insert(moved, at: to)
+        var out = t
+        var clamped = false
+        for k in min(from, to)...max(from, to) {
+            let c = contents[k]
+            let length = Double(t.segments[k].frameCount) / Double(t.fps)
+            let duration = durations[c.clip] ?? .infinity
+            guard duration >= length - 1e-6 else { return nil }
+            let start = min(c.sourceStart, max(0, duration - length))
+            if abs(start - c.sourceStart) > 1e-9 { clamped = true }
+            out.segments[k].id = c.id
+            out.segments[k].clip = c.clip
+            out.segments[k].sourceStart = start
+            out.segments[k].pinned = k == to ? true : c.pinned
+        }
+        return Result(timeline: out, clamped: clamped)
+    }
+
+    /// Shot `segment` shows `clip` instead, at its best part of the shot's length. Nil when the
+    /// clip is too short. The shot gets pinned.
+    public static func replaceClip(_ t: Timeline, segment: Int, with clip: ClipAnalysis) -> Timeline? {
+        guard t.segments.indices.contains(segment) else { return nil }
+        let length = Double(t.segments[segment].frameCount) / Double(t.fps)
+        guard let start = EditPlanner.bestStart(in: clip, length: length, fps: t.fps) else { return nil }
+        var out = t
+        out.segments[segment].clip = clip.url
+        out.segments[segment].sourceStart = start
+        out.segments[segment].pinned = true
+        return out
+    }
+
     public static func setPinned(_ t: Timeline, segment: Int, _ pinned: Bool) -> Timeline {
         var out = t
         if out.segments.indices.contains(segment) { out.segments[segment].pinned = pinned }

@@ -69,6 +69,24 @@ enum SmokeTest {
                 model.undo()  // generate
                 model.undo()  // delete
                 print("undo brings back the deleted beat: \(model.beats == gridBeforeDelete) mode \(model.beatMode.title)")
+                // shots: move, replace, re-roll, then undo all three
+                if let t0 = model.timeline, t0.segments.count > 6 {
+                    model.moveShot(from: 1, to: 5)
+                    let t1 = model.timeline!
+                    let moved = t1.segments[5].id == t0.segments[1].id && t1.cutFrames == t0.cutFrames && t1.isValid
+                    try? await Task.sleep(for: .milliseconds(50))
+                    let longest = model.clips.compactMap(\.analysis).filter { $0.url != t1.segments[2].clip }.max { $0.duration < $1.duration }!
+                    model.replaceShot(2, with: longest.url)
+                    let replaced = model.timeline!.segments[2].clip == longest.url && model.timeline!.segments[2].pinned
+                    try? await Task.sleep(for: .milliseconds(50))
+                    let before3 = model.timeline!.segments[3]
+                    model.rerollShot(3)
+                    let after3 = model.timeline!.segments[3]
+                    let rerolled = after3 != before3 && after3.startFrame == before3.startFrame && after3.frameCount == before3.frameCount
+                    try? await Task.sleep(for: .milliseconds(50))
+                    model.undo(); model.undo(); model.undo()
+                    print("shots: moved \(moved), replaced \(replaced), re-rolled \(rerolled), undo restores \(model.timeline == t0)")
+                }
                 // colour: a curve for all clips, one clip's own on top, undo / redo
                 if let t = model.timeline {
                     let clipsInVideo = Set(t.segments.map(\.clip))
